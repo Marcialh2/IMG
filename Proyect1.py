@@ -1,6 +1,6 @@
 import os
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 import numpy as np
 import pydicom
 from skimage.filters import threshold_otsu, threshold_yen, gaussian
@@ -8,88 +8,142 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
 import skimage.measure
-import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-import gc
+import multiprocessing
+import sys
 
 # === Cargar datos DICOM ===
-def read_dicom_file(args):
-    folder, filename = args
-    return pydicom.dcmread(os.path.join(folder, filename))
+def load_single_dicom(file_path):
+    try:
+        return pydicom.dcmread(file_path)
+    except Exception as e:
+        print(f"Error al cargar {file_path}: {str(e)}")
+        return None
 
 def load_dicom_series(dicom_folder):
-    dicom_files = sorted([f for f in os.listdir(dicom_folder) if f.endswith(".dcm")])
-    if not dicom_files:
-        raise FileNotFoundError("No se encontraron archivos DICOM en la carpeta especificada.")
-    
-    # Crear lista de argumentos para la función read_dicom_file
-    args_list = [(dicom_folder, f) for f in dicom_files]
-    
-    # Usar un pool de procesos para cargar los archivos DICOM
-    with mp.Pool(processes=mp.cpu_count()) as pool:
-        slices = pool.map(read_dicom_file, args_list)
-    
-    slices.sort(key=lambda x: x.InstanceNumber)
-    # Usar memmap para manejar grandes volúmenes de datos
-    pixel_data = np.stack([s.pixel_array for s in slices], axis=-1)
-    return pixel_data, slices
+    try:
+        dicom_files = sorted([f for f in os.listdir(dicom_folder) if f.endswith(".dcm")])
+        if not dicom_files:
+            raise FileNotFoundError("No se encontraron archivos DICOM en la carpeta especificada.")
+        
+        file_paths = [os.path.join(dicom_folder, f) for f in dicom_files]
+        
+        # Usar ThreadPoolExecutor para cargar archivos DICOM en paralelo
+        with ThreadPoolExecutor(max_workers=min(multiprocessing.cpu_count(), len(file_paths))) as executor:
+            slices = list(filter(None, executor.map(load_single_dicom, file_paths)))
+        
+        if not slices:
+            raise ValueError("No se pudieron cargar archivos DICOM válidos.")
+        
+        slices.sort(key=lambda x: x.InstanceNumber)
+        pixel_data = np.stack([s.pixel_array for s in slices], axis=-1)
+        return pixel_data, slices
+    except Exception as e:
+        raise Exception(f"Error al cargar la serie DICOM: {str(e)}")
 
 # === Preprocesamiento ===
-def preprocess_slice(slice_data, sigma=1):
-    slice_data = gaussian(slice_data, sigma=sigma)
-    slice_data = (slice_data - np.min(slice_data)) / (np.max(slice_data) - np.min(slice_data))
-    return slice_data
+def preprocess_slice(slice_data):
+    try:
+        # Usar operaciones in-place para reducir el uso de memoria
+        slice_data = gaussian(slice_data, sigma=1)
+        slice_min = np.min(slice_data)
+        slice_max = np.max(slice_data)
+        slice_data -= slice_min
+        slice_data /= (slice_max - slice_min)
+        return slice_data
+    except Exception as e:
+        print(f"Error en preprocesamiento: {str(e)}")
+        return None
 
 def preprocess_image(volume):
-    # Procesar cada slice en paralelo
-    with mp.Pool(processes=mp.cpu_count()) as pool:
-        processed_slices = pool.map(preprocess_slice, [volume[:,:,i] for i in range(volume.shape[2])])
-    
-    # Reconstruir el volumen
-    processed_volume = np.stack(processed_slices, axis=2)
-    return processed_volume
+    try:
+        # Procesar en lotes para mejorar el rendimiento
+        batch_size = min(10, volume.shape[2])  # Procesar hasta 10 slices a la vez
+        processed_slices = []
+        
+        for i in range(0, volume.shape[2], batch_size):
+            batch_end = min(i + batch_size, volume.shape[2])
+            batch = volume[:,:,i:batch_end]
+            
+            # Vectorizar el procesamiento del lote
+            batch = gaussian(batch, sigma=1)
+            batch_min = np.min(batch)
+            batch_max = np.max(batch)
+            batch = (batch - batch_min) / (batch_max - batch_min)
+            
+            processed_slices.extend([batch[:,:,j] for j in range(batch.shape[2])])
+        
+        return np.stack(processed_slices, axis=2)
+    except Exception as e:
+        raise Exception(f"Error en el preprocesamiento: {str(e)}")
 
 # === Segmentación ===
-def segment_slice(slice_data, method="otsu", manual_threshold=None):
-    if manual_threshold is not None:
-        return slice_data > manual_threshold
-    elif method == "otsu":
-        threshold = threshold_otsu(slice_data)
-    elif method == "yen":
-        threshold = threshold_yen(slice_data)
-    else:
-        raise ValueError("Método de segmentación no válido. Use 'otsu' o 'yen'.")
-    return slice_data > threshold
+def segment_slice(slice_data, method="otsu", custom_threshold=None):
+    try:
+        if custom_threshold is not None:
+            threshold = custom_threshold
+        elif method == "otsu":
+            threshold = threshold_otsu(slice_data)
+        elif method == "yen":
+            threshold = threshold_yen(slice_data)
+        else:
+            raise ValueError("Método de segmentación no válido. Use 'otsu' o 'yen'.")
+        
+        # Usar operación in-place
+        return slice_data > threshold
+    except Exception as e:
+        print(f"Error en segmentación: {str(e)}")
+        return None
 
-def segment_image(volume, method="otsu", manual_threshold=None):
-    # Procesar cada slice en paralelo
-    with mp.Pool(processes=mp.cpu_count()) as pool:
-        segment_func = partial(segment_slice, method=method, manual_threshold=manual_threshold)
-        segmented_slices = pool.map(segment_func, [volume[:,:,i] for i in range(volume.shape[2])])
-    
-    # Reconstruir el volumen segmentado
-    segmented_volume = np.stack(segmented_slices, axis=2)
-    return segmented_volume
+def segment_image(volume, method="otsu", custom_threshold=None):
+    try:
+        # Procesar en lotes para mejorar el rendimiento
+        batch_size = min(10, volume.shape[2])
+        segmented_slices = []
+        
+        for i in range(0, volume.shape[2], batch_size):
+            batch_end = min(i + batch_size, volume.shape[2])
+            batch = volume[:,:,i:batch_end]
+            
+            # Vectorizar el procesamiento del lote
+            if custom_threshold is not None:
+                threshold = custom_threshold
+            elif method == "otsu":
+                threshold = threshold_otsu(batch)
+            elif method == "yen":
+                threshold = threshold_yen(batch)
+            
+            batch = batch > threshold
+            segmented_slices.extend([batch[:,:,j] for j in range(batch.shape[2])])
+        
+        return np.stack(segmented_slices, axis=2)
+    except Exception as e:
+        raise Exception(f"Error en la segmentación: {str(e)}")
 
 # === Visualización 3D ===
 def visualize_3d(volume):
-    # Liberar memoria antes de la visualización 3D
-    gc.collect()
-    
-    verts, faces, _, _ = skimage.measure.marching_cubes(volume, level=0)
-    fig = plt.figure(figsize=(8, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    mesh = Poly3DCollection(verts[faces], alpha=0.7)
-    mesh.set_facecolor((0.5, 0.5, 1))
-    ax.add_collection3d(mesh)
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.set_xlim(0, volume.shape[0])
-    ax.set_ylim(0, volume.shape[1])
-    ax.set_zlim(0, volume.shape[2])
-    plt.tight_layout()
-    plt.show()
+    try:
+        # Reducir la resolución para mejorar el rendimiento de la visualización
+        scale_factor = 0.5
+        small_volume = volume[::2, ::2, ::2]
+        
+        verts, faces, _, _ = skimage.measure.marching_cubes(small_volume, level=0)
+        fig = plt.figure(figsize=(8, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        mesh = Poly3DCollection(verts[faces], alpha=0.7)
+        mesh.set_facecolor((0.5, 0.5, 1))
+        ax.add_collection3d(mesh)
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        ax.set_xlim(0, small_volume.shape[0])
+        ax.set_ylim(0, small_volume.shape[1])
+        ax.set_zlim(0, small_volume.shape[2])
+        plt.tight_layout()
+        plt.show()
+    except Exception as e:
+        messagebox.showerror("Error", f"Error en la visualización 3D: {str(e)}")
 
 # === Interfaz gráfica ===
 class DICOMApp:
@@ -102,28 +156,21 @@ class DICOMApp:
         self.seg_yen = None
         self.index = tk.IntVar(value=0)
         self.selected_3d_method = tk.StringVar(value="Yen")
-        
-        # Variables para los umbrales
-        self.otsu_threshold = tk.DoubleVar(value=0.5)
-        self.yen_threshold = tk.DoubleVar(value=0.5)
-        
-        # Configurar el número de procesos
-        self.num_processes = mp.cpu_count()
-        
+
+        self.use_custom_threshold_otsu = tk.BooleanVar(value=False)
+        self.custom_threshold_otsu = tk.DoubleVar(value=0.5)
+
+        self.use_custom_threshold_yen = tk.BooleanVar(value=False)
+        self.custom_threshold_yen = tk.DoubleVar(value=0.5)
+
         self.setup_ui()
 
     def setup_ui(self):
         frame = ttk.Frame(self.root, padding=10)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        # Añadir información sobre el procesamiento
-        info_frame = ttk.Frame(frame)
-        info_frame.pack(side=tk.TOP, pady=5)
-        ttk.Label(info_frame, text=f"Procesamiento usando {self.num_processes} núcleos").pack(side=tk.LEFT)
-
         ttk.Button(frame, text="Cargar DICOM", command=self.load_dicom).pack(side=tk.TOP, pady=5)
 
-        # Método de reconstrucción 3D
         method_frame = ttk.Frame(frame)
         method_frame.pack(side=tk.TOP, pady=5)
         ttk.Label(method_frame, text="Método para 3D:").pack(side=tk.LEFT)
@@ -131,27 +178,31 @@ class DICOMApp:
         method_selector['values'] = ["Otsu", "Yen"]
         method_selector.pack(side=tk.LEFT, padx=5)
 
-        # Sliders para umbrales
-        threshold_frame = ttk.Frame(frame)
-        threshold_frame.pack(side=tk.TOP, pady=5)
-        
-        # Slider para Otsu
-        otsu_frame = ttk.Frame(threshold_frame)
-        otsu_frame.pack(side=tk.LEFT, padx=10)
-        ttk.Label(otsu_frame, text="Umbral Otsu:").pack(side=tk.TOP)
-        self.otsu_slider = ttk.Scale(otsu_frame, from_=0, to=1, orient=tk.HORIZONTAL, 
-                                   variable=self.otsu_threshold, command=self.update_segmentation)
-        self.otsu_slider.pack(side=tk.TOP)
-        
-        # Slider para Yen
-        yen_frame = ttk.Frame(threshold_frame)
-        yen_frame.pack(side=tk.LEFT, padx=10)
-        ttk.Label(yen_frame, text="Umbral Yen:").pack(side=tk.TOP)
-        self.yen_slider = ttk.Scale(yen_frame, from_=0, to=1, orient=tk.HORIZONTAL, 
-                                  variable=self.yen_threshold, command=self.update_segmentation)
-        self.yen_slider.pack(side=tk.TOP)
-
         ttk.Button(frame, text="Reconstrucción 3D", command=self.show_3d).pack(side=tk.TOP, pady=5)
+
+        # === Umbral Otsu personalizado ===
+        otsu_frame = ttk.LabelFrame(frame, text="Umbral Otsu personalizado", padding=10)
+        otsu_frame.pack(fill=tk.X, pady=5)
+        ttk.Checkbutton(otsu_frame, text="Usar umbral Otsu personalizado",
+                        variable=self.use_custom_threshold_otsu, command=self.update_segmentation).pack(anchor='w')
+        otsu_slider_frame = ttk.Frame(otsu_frame)
+        otsu_slider_frame.pack(fill=tk.X)
+        ttk.Label(otsu_slider_frame, text="Umbral:").pack(side=tk.LEFT)
+        ttk.Label(otsu_slider_frame, textvariable=self.custom_threshold_otsu).pack(side=tk.RIGHT)
+        ttk.Scale(otsu_slider_frame, from_=0.0, to=1.0, variable=self.custom_threshold_otsu,
+                  command=lambda e: self.update_segmentation(), orient=tk.HORIZONTAL).pack(fill=tk.X)
+
+        # === Umbral Yen personalizado ===
+        yen_frame = ttk.LabelFrame(frame, text="Umbral Yen personalizado", padding=10)
+        yen_frame.pack(fill=tk.X, pady=5)
+        ttk.Checkbutton(yen_frame, text="Usar umbral Yen personalizado",
+                        variable=self.use_custom_threshold_yen, command=self.update_segmentation).pack(anchor='w')
+        yen_slider_frame = ttk.Frame(yen_frame)
+        yen_slider_frame.pack(fill=tk.X)
+        ttk.Label(yen_slider_frame, text="Umbral:").pack(side=tk.LEFT)
+        ttk.Label(yen_slider_frame, textvariable=self.custom_threshold_yen).pack(side=tk.RIGHT)
+        ttk.Scale(yen_slider_frame, from_=0.0, to=1.0, variable=self.custom_threshold_yen,
+                  command=lambda e: self.update_segmentation(), orient=tk.HORIZONTAL).pack(fill=tk.X)
 
         self.slider = ttk.Scale(frame, from_=0, to=0, orient=tk.HORIZONTAL, command=self.update_images)
         self.slider.pack(fill=tk.X, pady=5)
@@ -160,73 +211,81 @@ class DICOMApp:
         self.canvas = FigureCanvasTkAgg(self.fig, master=frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-    def update_segmentation(self, event=None):
-        if self.volume is None:
-            return
-            
-        # Liberar memoria antes de la nueva segmentación
-        gc.collect()
-            
-        self.seg_otsu = segment_image(self.volume, method="otsu", manual_threshold=self.otsu_threshold.get())
-        self.seg_yen = segment_image(self.volume, method="yen", manual_threshold=self.yen_threshold.get())
-        self.update_images()
-
     def load_dicom(self):
-        folder = filedialog.askdirectory()
-        if not folder:
-            return
+        try:
+            folder = filedialog.askdirectory()
+            if not folder:
+                return
 
-        # Liberar memoria antes de cargar nuevos datos
-        gc.collect()
+            volume, slices = load_dicom_series(folder)
+            volume = preprocess_image(volume)
 
-        volume, slices = load_dicom_series(folder)
-        volume = preprocess_image(volume)
+            self.volume = volume
+            self.update_segmentation()
 
-        self.volume = volume
-        self.seg_otsu = segment_image(volume, method="otsu", manual_threshold=self.otsu_threshold.get())
-        self.seg_yen = segment_image(volume, method="yen", manual_threshold=self.yen_threshold.get())
+            self.slider.configure(to=volume.shape[2] - 1)
+            self.index.set(volume.shape[2] // 2)
+            self.slider.set(volume.shape[2] // 2)
 
-        self.slider.configure(to=volume.shape[2] - 1)
-        self.index.set(volume.shape[2] // 2)
-        self.slider.set(volume.shape[2] // 2)
+            self.update_images()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
 
-        self.update_images()
+    def update_segmentation(self):
+        try:
+            if self.volume is None:
+                return
+
+            if self.use_custom_threshold_otsu.get():
+                thresh_otsu = self.custom_threshold_otsu.get()
+            else:
+                thresh_otsu = None
+
+            if self.use_custom_threshold_yen.get():
+                thresh_yen = self.custom_threshold_yen.get()
+            else:
+                thresh_yen = None
+
+            self.seg_otsu = segment_image(self.volume, method="otsu", custom_threshold=thresh_otsu)
+            self.seg_yen = segment_image(self.volume, method="yen", custom_threshold=thresh_yen)
+            self.update_images()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
 
     def update_images(self, event=None):
-        if self.volume is None:
-            return
+        try:
+            if self.volume is None:
+                return
 
-        i = int(float(self.slider.get()))
-        
-        # Limpiar los ejes antes de actualizar
-        for ax in self.axes:
-            ax.clear()
-            
-        self.axes[0].imshow(self.volume[:, :, i], cmap='gray')
-        self.axes[0].set_title("Original")
-        self.axes[1].imshow(self.seg_otsu[:, :, i], cmap='gray')
-        self.axes[1].set_title("Otsu")
-        self.axes[2].imshow(self.seg_yen[:, :, i], cmap='gray')
-        self.axes[2].set_title("Yen")
+            i = int(float(self.slider.get()))
+            self.axes[0].imshow(self.volume[:, :, i], cmap='gray')
+            self.axes[0].set_title("Original")
+            self.axes[1].imshow(self.seg_otsu[:, :, i], cmap='gray')
+            self.axes[1].set_title("Otsu")
+            self.axes[2].imshow(self.seg_yen[:, :, i], cmap='gray')
+            self.axes[2].set_title("Yen")
 
-        for ax in self.axes:
-            ax.axis('off')
-        self.fig.tight_layout()
-        self.canvas.draw()
+            for ax in self.axes:
+                ax.axis('off')
+            self.fig.tight_layout()
+            self.canvas.draw()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
 
     def show_3d(self):
-        if self.selected_3d_method.get() == "Otsu" and self.seg_otsu is not None:
-            visualize_3d(self.seg_otsu)
-        elif self.selected_3d_method.get() == "Yen" and self.seg_yen is not None:
-            visualize_3d(self.seg_yen)
+        try:
+            if self.selected_3d_method.get() == "Otsu" and self.seg_otsu is not None:
+                visualize_3d(self.seg_otsu)
+            elif self.selected_3d_method.get() == "Yen" and self.seg_yen is not None:
+                visualize_3d(self.seg_yen)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
 
 if __name__ == '__main__':
-    # Configurar el backend de matplotlib para mejor rendimiento
-    plt.switch_backend('TkAgg')
-    
-    # Configurar el número de hilos de NumPy
-    np.set_printoptions(threshold=np.inf)
-    
-    root = tk.Tk()
-    app = DICOMApp(root)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        app = DICOMApp(root)
+        root.mainloop()
+    except Exception as e:
+        messagebox.showerror("Error", f"Error fatal: {str(e)}")
+        sys.exit(1)
