@@ -13,14 +13,21 @@ from functools import partial
 import gc
 
 # === Cargar datos DICOM ===
+def read_dicom_file(args):
+    folder, filename = args
+    return pydicom.dcmread(os.path.join(folder, filename))
+
 def load_dicom_series(dicom_folder):
     dicom_files = sorted([f for f in os.listdir(dicom_folder) if f.endswith(".dcm")])
     if not dicom_files:
         raise FileNotFoundError("No se encontraron archivos DICOM en la carpeta especificada.")
     
+    # Crear lista de argumentos para la función read_dicom_file
+    args_list = [(dicom_folder, f) for f in dicom_files]
+    
     # Usar un pool de procesos para cargar los archivos DICOM
     with mp.Pool(processes=mp.cpu_count()) as pool:
-        slices = pool.map(lambda f: pydicom.dcmread(os.path.join(dicom_folder, f)), dicom_files)
+        slices = pool.map(read_dicom_file, args_list)
     
     slices.sort(key=lambda x: x.InstanceNumber)
     # Usar memmap para manejar grandes volúmenes de datos
