@@ -106,15 +106,19 @@ def segment_image(volume, method="otsu", custom_threshold=None):
             batch_end = min(i + batch_size, volume.shape[2])
             batch = volume[:,:,i:batch_end]
             
-            # Vectorizar el procesamiento del lote
-            if custom_threshold is not None:
-                threshold = custom_threshold
-            elif method == "otsu":
-                threshold = threshold_otsu(batch)
-            elif method == "yen":
-                threshold = threshold_yen(batch)
+            # Procesar cada slice individualmente para calcular el umbral correctamente
+            for j in range(batch.shape[2]):
+                slice_data = batch[:,:,j]
+                
+                if custom_threshold is not None:
+                    threshold = custom_threshold
+                elif method == "otsu":
+                    threshold = threshold_otsu(slice_data)
+                elif method == "yen":
+                    threshold = threshold_yen(slice_data)
+                
+                batch[:,:,j] = slice_data > threshold
             
-            batch = batch > threshold
             segmented_slices.extend([batch[:,:,j] for j in range(batch.shape[2])])
         
         return np.stack(segmented_slices, axis=2)
