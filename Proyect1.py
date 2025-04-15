@@ -45,8 +45,12 @@ def load_dicom_series(dicom_folder):
 # === Preprocesamiento ===
 def preprocess_slice(slice_data):
     try:
+        # Usar operaciones in-place para reducir el uso de memoria
         slice_data = gaussian(slice_data, sigma=1)
-        slice_data = (slice_data - np.min(slice_data)) / (np.max(slice_data) - np.min(slice_data))
+        slice_min = np.min(slice_data)
+        slice_max = np.max(slice_data)
+        slice_data -= slice_min
+        slice_data /= (slice_max - slice_min)
         return slice_data
     except Exception as e:
         print(f"Error en preprocesamiento: {str(e)}")
@@ -54,14 +58,22 @@ def preprocess_slice(slice_data):
 
 def preprocess_image(volume):
     try:
-        # Procesar slice por slice para evitar problemas de memoria
+        # Procesar en lotes para mejorar el rendimiento
+        batch_size = min(10, volume.shape[2])  # Procesar hasta 10 slices a la vez
         processed_slices = []
-        for i in range(volume.shape[2]):
-            processed_slice = preprocess_slice(volume[:,:,i])
-            if processed_slice is not None:
-                processed_slices.append(processed_slice)
-            else:
-                raise ValueError(f"Error en el preprocesamiento de la slice {i}")
+        
+        for i in range(0, volume.shape[2], batch_size):
+            batch_end = min(i + batch_size, volume.shape[2])
+            batch = volume[:,:,i:batch_end]
+            
+            # Vectorizar el procesamiento del lote
+            batch = gaussian(batch, sigma=1)
+            batch_min = np.min(batch)
+            batch_max = np.max(batch)
+            batch = (batch - batch_min) / (batch_max - batch_min)
+            
+            processed_slices.extend([batch[:,:,j] for j in range(batch.shape[2])])
+        
         return np.stack(processed_slices, axis=2)
     except Exception as e:
         raise Exception(f"Error en el preprocesamiento: {str(e)}")
@@ -77,6 +89,8 @@ def segment_slice(slice_data, method="otsu", custom_threshold=None):
             threshold = threshold_yen(slice_data)
         else:
             raise ValueError("Método de segmentación no válido. Use 'otsu' o 'yen'.")
+        
+        # Usar operación in-place
         return slice_data > threshold
     except Exception as e:
         print(f"Error en segmentación: {str(e)}")
@@ -84,14 +98,25 @@ def segment_slice(slice_data, method="otsu", custom_threshold=None):
 
 def segment_image(volume, method="otsu", custom_threshold=None):
     try:
-        # Procesar slice por slice para evitar problemas de memoria
+        # Procesar en lotes para mejorar el rendimiento
+        batch_size = min(10, volume.shape[2])
         segmented_slices = []
-        for i in range(volume.shape[2]):
-            segmented_slice = segment_slice(volume[:,:,i], method, custom_threshold)
-            if segmented_slice is not None:
-                segmented_slices.append(segmented_slice)
-            else:
-                raise ValueError(f"Error en la segmentación de la slice {i}")
+        
+        for i in range(0, volume.shape[2], batch_size):
+            batch_end = min(i + batch_size, volume.shape[2])
+            batch = volume[:,:,i:batch_end]
+            
+            # Vectorizar el procesamiento del lote
+            if custom_threshold is not None:
+                threshold = custom_threshold
+            elif method == "otsu":
+                threshold = threshold_otsu(batch)
+            elif method == "yen":
+                threshold = threshold_yen(batch)
+            
+            batch = batch > threshold
+            segmented_slices.extend([batch[:,:,j] for j in range(batch.shape[2])])
+        
         return np.stack(segmented_slices, axis=2)
     except Exception as e:
         raise Exception(f"Error en la segmentación: {str(e)}")
@@ -99,7 +124,11 @@ def segment_image(volume, method="otsu", custom_threshold=None):
 # === Visualización 3D ===
 def visualize_3d(volume):
     try:
-        verts, faces, _, _ = skimage.measure.marching_cubes(volume, level=0)
+        # Reducir la resolución para mejorar el rendimiento de la visualización
+        scale_factor = 0.5
+        small_volume = volume[::2, ::2, ::2]
+        
+        verts, faces, _, _ = skimage.measure.marching_cubes(small_volume, level=0)
         fig = plt.figure(figsize=(8, 8))
         ax = fig.add_subplot(111, projection='3d')
         mesh = Poly3DCollection(verts[faces], alpha=0.7)
@@ -108,9 +137,9 @@ def visualize_3d(volume):
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.set_zlabel("Z")
-        ax.set_xlim(0, volume.shape[0])
-        ax.set_ylim(0, volume.shape[1])
-        ax.set_zlim(0, volume.shape[2])
+        ax.set_xlim(0, small_volume.shape[0])
+        ax.set_ylim(0, small_volume.shape[1])
+        ax.set_zlim(0, small_volume.shape[2])
         plt.tight_layout()
         plt.show()
     except Exception as e:
