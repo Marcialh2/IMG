@@ -154,14 +154,12 @@ class DICOMApp:
         self.volume = None
         self.seg_otsu = None
         self.seg_yen = None
+        self.seg_fixed = None
         self.index = tk.IntVar(value=0)
         self.selected_3d_method = tk.StringVar(value="Yen")
 
-        self.use_custom_threshold_otsu = tk.BooleanVar(value=False)
-        self.custom_threshold_otsu = tk.DoubleVar(value=0.5)
-
-        self.use_custom_threshold_yen = tk.BooleanVar(value=False)
-        self.custom_threshold_yen = tk.DoubleVar(value=0.5)
+        # Umbral fijo personalizado
+        self.fixed_threshold = tk.DoubleVar(value=0.5)
 
         self.setup_ui()
 
@@ -175,39 +173,25 @@ class DICOMApp:
         method_frame.pack(side=tk.TOP, pady=5)
         ttk.Label(method_frame, text="Método para 3D:").pack(side=tk.LEFT)
         method_selector = ttk.Combobox(method_frame, textvariable=self.selected_3d_method, state="readonly")
-        method_selector['values'] = ["Otsu", "Yen"]
+        method_selector['values'] = ["Otsu", "Yen", "Fijo"]
         method_selector.pack(side=tk.LEFT, padx=5)
 
         ttk.Button(frame, text="Reconstrucción 3D", command=self.show_3d).pack(side=tk.TOP, pady=5)
 
-        # === Umbral Otsu personalizado ===
-        otsu_frame = ttk.LabelFrame(frame, text="Umbral Otsu personalizado", padding=10)
-        otsu_frame.pack(fill=tk.X, pady=5)
-        ttk.Checkbutton(otsu_frame, text="Usar umbral Otsu personalizado",
-                        variable=self.use_custom_threshold_otsu, command=self.update_segmentation).pack(anchor='w')
-        otsu_slider_frame = ttk.Frame(otsu_frame)
-        otsu_slider_frame.pack(fill=tk.X)
-        ttk.Label(otsu_slider_frame, text="Umbral:").pack(side=tk.LEFT)
-        ttk.Label(otsu_slider_frame, textvariable=self.custom_threshold_otsu).pack(side=tk.RIGHT)
-        ttk.Scale(otsu_slider_frame, from_=0.0, to=1.0, variable=self.custom_threshold_otsu,
-                  command=lambda e: self.update_segmentation(), orient=tk.HORIZONTAL).pack(fill=tk.X)
-
-        # === Umbral Yen personalizado ===
-        yen_frame = ttk.LabelFrame(frame, text="Umbral Yen personalizado", padding=10)
-        yen_frame.pack(fill=tk.X, pady=5)
-        ttk.Checkbutton(yen_frame, text="Usar umbral Yen personalizado",
-                        variable=self.use_custom_threshold_yen, command=self.update_segmentation).pack(anchor='w')
-        yen_slider_frame = ttk.Frame(yen_frame)
-        yen_slider_frame.pack(fill=tk.X)
-        ttk.Label(yen_slider_frame, text="Umbral:").pack(side=tk.LEFT)
-        ttk.Label(yen_slider_frame, textvariable=self.custom_threshold_yen).pack(side=tk.RIGHT)
-        ttk.Scale(yen_slider_frame, from_=0.0, to=1.0, variable=self.custom_threshold_yen,
-                  command=lambda e: self.update_segmentation(), orient=tk.HORIZONTAL).pack(fill=tk.X)
+        # === Umbral fijo personalizado ===
+        fixed_frame = ttk.LabelFrame(frame, text="Umbral fijo personalizado", padding=10)
+        fixed_frame.pack(fill=tk.X, pady=5)
+        fixed_slider_frame = ttk.Frame(fixed_frame)
+        fixed_slider_frame.pack(fill=tk.X)
+        ttk.Label(fixed_slider_frame, text="Umbral:").pack(side=tk.LEFT)
+        ttk.Label(fixed_slider_frame, textvariable=self.fixed_threshold).pack(side=tk.RIGHT)
+        ttk.Scale(fixed_slider_frame, from_=0.0, to=1.0, variable=self.fixed_threshold,
+                  command=lambda e: self.update_fixed_segmentation(), orient=tk.HORIZONTAL).pack(fill=tk.X)
 
         self.slider = ttk.Scale(frame, from_=0, to=0, orient=tk.HORIZONTAL, command=self.update_images)
         self.slider.pack(fill=tk.X, pady=5)
 
-        self.fig, self.axes = plt.subplots(1, 3, figsize=(12, 4))
+        self.fig, self.axes = plt.subplots(1, 4, figsize=(16, 4))
         self.canvas = FigureCanvasTkAgg(self.fig, master=frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
@@ -222,6 +206,7 @@ class DICOMApp:
 
             self.volume = volume
             self.update_segmentation()
+            self.update_fixed_segmentation()
 
             self.slider.configure(to=volume.shape[2] - 1)
             self.index.set(volume.shape[2] // 2)
@@ -236,18 +221,19 @@ class DICOMApp:
             if self.volume is None:
                 return
 
-            if self.use_custom_threshold_otsu.get():
-                thresh_otsu = self.custom_threshold_otsu.get()
-            else:
-                thresh_otsu = None
-
-            if self.use_custom_threshold_yen.get():
-                thresh_yen = self.custom_threshold_yen.get()
-            else:
-                thresh_yen = None
-
-            self.seg_otsu = segment_image(self.volume, method="otsu", custom_threshold=thresh_otsu)
-            self.seg_yen = segment_image(self.volume, method="yen", custom_threshold=thresh_yen)
+            self.seg_otsu = segment_image(self.volume, method="otsu")
+            self.seg_yen = segment_image(self.volume, method="yen")
+            self.update_images()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            
+    def update_fixed_segmentation(self):
+        try:
+            if self.volume is None:
+                return
+                
+            threshold = self.fixed_threshold.get()
+            self.seg_fixed = segment_image(self.volume, method="otsu", custom_threshold=threshold)
             self.update_images()
         except Exception as e:
             messagebox.showerror("Error", str(e))
@@ -264,6 +250,8 @@ class DICOMApp:
             self.axes[1].set_title("Otsu")
             self.axes[2].imshow(self.seg_yen[:, :, i], cmap='gray')
             self.axes[2].set_title("Yen")
+            self.axes[3].imshow(self.seg_fixed[:, :, i], cmap='gray')
+            self.axes[3].set_title("Umbral fijo")
 
             for ax in self.axes:
                 ax.axis('off')
@@ -278,6 +266,8 @@ class DICOMApp:
                 visualize_3d(self.seg_otsu)
             elif self.selected_3d_method.get() == "Yen" and self.seg_yen is not None:
                 visualize_3d(self.seg_yen)
+            elif self.selected_3d_method.get() == "Fijo" and self.seg_fixed is not None:
+                visualize_3d(self.seg_fixed)
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
