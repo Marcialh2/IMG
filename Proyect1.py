@@ -1,6 +1,6 @@
 import os
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 import numpy as np
 import pydicom
 from skimage.filters import threshold_otsu, threshold_yen, gaussian
@@ -8,51 +8,113 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
 import skimage.measure
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+import multiprocessing
+import sys
 
 # === Cargar datos DICOM ===
+def load_single_dicom(file_path):
+    try:
+        return pydicom.dcmread(file_path)
+    except Exception as e:
+        print(f"Error al cargar {file_path}: {str(e)}")
+        return None
+
 def load_dicom_series(dicom_folder):
-    dicom_files = sorted([f for f in os.listdir(dicom_folder) if f.endswith(".dcm")])
-    if not dicom_files:
-        raise FileNotFoundError("No se encontraron archivos DICOM en la carpeta especificada.")
-    slices = [pydicom.dcmread(os.path.join(dicom_folder, f)) for f in dicom_files]
-    slices.sort(key=lambda x: x.InstanceNumber)
-    pixel_data = np.stack([s.pixel_array for s in slices], axis=-1)
-    return pixel_data, slices
+    try:
+        dicom_files = sorted([f for f in os.listdir(dicom_folder) if f.endswith(".dcm")])
+        if not dicom_files:
+            raise FileNotFoundError("No se encontraron archivos DICOM en la carpeta especificada.")
+        
+        file_paths = [os.path.join(dicom_folder, f) for f in dicom_files]
+        
+        # Usar ThreadPoolExecutor para cargar archivos DICOM en paralelo
+        with ThreadPoolExecutor(max_workers=min(multiprocessing.cpu_count(), len(file_paths))) as executor:
+            slices = list(filter(None, executor.map(load_single_dicom, file_paths)))
+        
+        if not slices:
+            raise ValueError("No se pudieron cargar archivos DICOM válidos.")
+        
+        slices.sort(key=lambda x: x.InstanceNumber)
+        pixel_data = np.stack([s.pixel_array for s in slices], axis=-1)
+        return pixel_data, slices
+    except Exception as e:
+        raise Exception(f"Error al cargar la serie DICOM: {str(e)}")
 
 # === Preprocesamiento ===
+def preprocess_slice(slice_data):
+    try:
+        slice_data = gaussian(slice_data, sigma=1)
+        slice_data = (slice_data - np.min(slice_data)) / (np.max(slice_data) - np.min(slice_data))
+        return slice_data
+    except Exception as e:
+        print(f"Error en preprocesamiento: {str(e)}")
+        return None
+
 def preprocess_image(volume):
-    volume = gaussian(volume, sigma=1)
-    volume = (volume - np.min(volume)) / (np.max(volume) - np.min(volume))
-    return volume
+    try:
+        # Procesar slice por slice para evitar problemas de memoria
+        processed_slices = []
+        for i in range(volume.shape[2]):
+            processed_slice = preprocess_slice(volume[:,:,i])
+            if processed_slice is not None:
+                processed_slices.append(processed_slice)
+            else:
+                raise ValueError(f"Error en el preprocesamiento de la slice {i}")
+        return np.stack(processed_slices, axis=2)
+    except Exception as e:
+        raise Exception(f"Error en el preprocesamiento: {str(e)}")
 
 # === Segmentación ===
+def segment_slice(slice_data, method="otsu", custom_threshold=None):
+    try:
+        if custom_threshold is not None:
+            threshold = custom_threshold
+        elif method == "otsu":
+            threshold = threshold_otsu(slice_data)
+        elif method == "yen":
+            threshold = threshold_yen(slice_data)
+        else:
+            raise ValueError("Método de segmentación no válido. Use 'otsu' o 'yen'.")
+        return slice_data > threshold
+    except Exception as e:
+        print(f"Error en segmentación: {str(e)}")
+        return None
+
 def segment_image(volume, method="otsu", custom_threshold=None):
-    if custom_threshold is not None:
-        threshold = custom_threshold
-    elif method == "otsu":
-        threshold = threshold_otsu(volume)
-    elif method == "yen":
-        threshold = threshold_yen(volume)
-    else:
-        raise ValueError("Método de segmentación no válido. Use 'otsu' o 'yen'.")
-    return volume > threshold
+    try:
+        # Procesar slice por slice para evitar problemas de memoria
+        segmented_slices = []
+        for i in range(volume.shape[2]):
+            segmented_slice = segment_slice(volume[:,:,i], method, custom_threshold)
+            if segmented_slice is not None:
+                segmented_slices.append(segmented_slice)
+            else:
+                raise ValueError(f"Error en la segmentación de la slice {i}")
+        return np.stack(segmented_slices, axis=2)
+    except Exception as e:
+        raise Exception(f"Error en la segmentación: {str(e)}")
 
 # === Visualización 3D ===
 def visualize_3d(volume):
-    verts, faces, _, _ = skimage.measure.marching_cubes(volume, level=0)
-    fig = plt.figure(figsize=(8, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    mesh = Poly3DCollection(verts[faces], alpha=0.7)
-    mesh.set_facecolor((0.5, 0.5, 1))
-    ax.add_collection3d(mesh)
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.set_xlim(0, volume.shape[0])
-    ax.set_ylim(0, volume.shape[1])
-    ax.set_zlim(0, volume.shape[2])
-    plt.tight_layout()
-    plt.show()
+    try:
+        verts, faces, _, _ = skimage.measure.marching_cubes(volume, level=0)
+        fig = plt.figure(figsize=(8, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        mesh = Poly3DCollection(verts[faces], alpha=0.7)
+        mesh.set_facecolor((0.5, 0.5, 1))
+        ax.add_collection3d(mesh)
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        ax.set_xlim(0, volume.shape[0])
+        ax.set_ylim(0, volume.shape[1])
+        ax.set_zlim(0, volume.shape[2])
+        plt.tight_layout()
+        plt.show()
+    except Exception as e:
+        messagebox.showerror("Error", f"Error en la visualización 3D: {str(e)}")
 
 # === Interfaz gráfica ===
 class DICOMApp:
@@ -121,64 +183,80 @@ class DICOMApp:
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
     def load_dicom(self):
-        folder = filedialog.askdirectory()
-        if not folder:
-            return
+        try:
+            folder = filedialog.askdirectory()
+            if not folder:
+                return
 
-        volume, slices = load_dicom_series(folder)
-        volume = preprocess_image(volume)
+            volume, slices = load_dicom_series(folder)
+            volume = preprocess_image(volume)
 
-        self.volume = volume
-        self.update_segmentation()
+            self.volume = volume
+            self.update_segmentation()
 
-        self.slider.configure(to=volume.shape[2] - 1)
-        self.index.set(volume.shape[2] // 2)
-        self.slider.set(volume.shape[2] // 2)
+            self.slider.configure(to=volume.shape[2] - 1)
+            self.index.set(volume.shape[2] // 2)
+            self.slider.set(volume.shape[2] // 2)
 
-        self.update_images()
+            self.update_images()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
 
     def update_segmentation(self):
-        if self.volume is None:
-            return
+        try:
+            if self.volume is None:
+                return
 
-        if self.use_custom_threshold_otsu.get():
-            thresh_otsu = self.custom_threshold_otsu.get()
-        else:
-            thresh_otsu = None
+            if self.use_custom_threshold_otsu.get():
+                thresh_otsu = self.custom_threshold_otsu.get()
+            else:
+                thresh_otsu = None
 
-        if self.use_custom_threshold_yen.get():
-            thresh_yen = self.custom_threshold_yen.get()
-        else:
-            thresh_yen = None
+            if self.use_custom_threshold_yen.get():
+                thresh_yen = self.custom_threshold_yen.get()
+            else:
+                thresh_yen = None
 
-        self.seg_otsu = segment_image(self.volume, method="otsu", custom_threshold=thresh_otsu)
-        self.seg_yen = segment_image(self.volume, method="yen", custom_threshold=thresh_yen)
-        self.update_images()
+            self.seg_otsu = segment_image(self.volume, method="otsu", custom_threshold=thresh_otsu)
+            self.seg_yen = segment_image(self.volume, method="yen", custom_threshold=thresh_yen)
+            self.update_images()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
 
     def update_images(self, event=None):
-        if self.volume is None:
-            return
+        try:
+            if self.volume is None:
+                return
 
-        i = int(float(self.slider.get()))
-        self.axes[0].imshow(self.volume[:, :, i], cmap='gray')
-        self.axes[0].set_title("Original")
-        self.axes[1].imshow(self.seg_otsu[:, :, i], cmap='gray')
-        self.axes[1].set_title("Otsu")
-        self.axes[2].imshow(self.seg_yen[:, :, i], cmap='gray')
-        self.axes[2].set_title("Yen")
+            i = int(float(self.slider.get()))
+            self.axes[0].imshow(self.volume[:, :, i], cmap='gray')
+            self.axes[0].set_title("Original")
+            self.axes[1].imshow(self.seg_otsu[:, :, i], cmap='gray')
+            self.axes[1].set_title("Otsu")
+            self.axes[2].imshow(self.seg_yen[:, :, i], cmap='gray')
+            self.axes[2].set_title("Yen")
 
-        for ax in self.axes:
-            ax.axis('off')
-        self.fig.tight_layout()
-        self.canvas.draw()
+            for ax in self.axes:
+                ax.axis('off')
+            self.fig.tight_layout()
+            self.canvas.draw()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
 
     def show_3d(self):
-        if self.selected_3d_method.get() == "Otsu" and self.seg_otsu is not None:
-            visualize_3d(self.seg_otsu)
-        elif self.selected_3d_method.get() == "Yen" and self.seg_yen is not None:
-            visualize_3d(self.seg_yen)
+        try:
+            if self.selected_3d_method.get() == "Otsu" and self.seg_otsu is not None:
+                visualize_3d(self.seg_otsu)
+            elif self.selected_3d_method.get() == "Yen" and self.seg_yen is not None:
+                visualize_3d(self.seg_yen)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
 
 if __name__ == '__main__':
-    root = tk.Tk()
-    app = DICOMApp(root)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        app = DICOMApp(root)
+        root.mainloop()
+    except Exception as e:
+        messagebox.showerror("Error", f"Error fatal: {str(e)}")
+        sys.exit(1)
