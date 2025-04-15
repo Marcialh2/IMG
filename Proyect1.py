@@ -124,22 +124,37 @@ def segment_image(volume, method="otsu", custom_threshold=None):
 # === Visualización 3D ===
 def visualize_3d(volume):
     try:
-        # Reducir la resolución para mejorar el rendimiento de la visualización
-        scale_factor = 0.5
-        small_volume = volume[::2, ::2, ::2]
+        # Reducir el factor de escala para obtener más detalle
+        scale_factor = 0.25  # Cambiado de 0.5 a 0.25 para mayor detalle
+        small_volume = volume[::int(1/scale_factor), ::int(1/scale_factor), ::int(1/scale_factor)]
         
-        verts, faces, _, _ = skimage.measure.marching_cubes(small_volume, level=0)
-        fig = plt.figure(figsize=(8, 8))
+        # Ajustar el nivel para el algoritmo marching cubes
+        level = 0.5  # Ajustar este valor puede mejorar la detección de bordes
+        
+        # Usar marching cubes con parámetros ajustados para mayor detalle
+        verts, faces, _, _ = skimage.measure.marching_cubes(small_volume, level=level, spacing=(1, 1, 1))
+        
+        # Crear figura con tamaño ajustado
+        fig = plt.figure(figsize=(10, 10))
         ax = fig.add_subplot(111, projection='3d')
-        mesh = Poly3DCollection(verts[faces], alpha=0.7)
+        
+        # Crear malla con transparencia ajustada
+        mesh = Poly3DCollection(verts[faces], alpha=0.8)
         mesh.set_facecolor((0.5, 0.5, 1))
         ax.add_collection3d(mesh)
+        
+        # Ajustar límites y etiquetas
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.set_zlabel("Z")
         ax.set_xlim(0, small_volume.shape[0])
         ax.set_ylim(0, small_volume.shape[1])
         ax.set_zlim(0, small_volume.shape[2])
+        
+        # Ajustar la vista para mejor visualización
+        ax.view_init(elev=30, azim=45)
+        
+        # Ajustar el layout
         plt.tight_layout()
         plt.show()
     except Exception as e:
