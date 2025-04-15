@@ -112,20 +112,9 @@ def segment_image(volume, method="otsu", custom_threshold=None):
             # Procesar cada slice individualmente para calcular el umbral correctamente
             for j in range(batch.shape[2]):
                 slice_data = batch[:,:,j]
-                
-                if custom_threshold is not None:
-                    threshold = custom_threshold
-                    print(f"Slice {i+j}: Usando umbral personalizado: {threshold}")
-                elif method == "otsu":
-                    threshold = threshold_otsu(slice_data)
-                    print(f"Slice {i+j}: Umbral Otsu: {threshold}")
-                elif method == "yen":
-                    threshold = threshold_yen(slice_data)
-                    print(f"Slice {i+j}: Umbral Yen: {threshold}")
-                
-                batch[:,:,j] = slice_data > threshold
-            
-            segmented_slices.extend([batch[:,:,j] for j in range(batch.shape[2])])
+                segmented_slice = segment_slice(slice_data, method, custom_threshold)
+                if segmented_slice is not None:
+                    segmented_slices.append(segmented_slice)
         
         return np.stack(segmented_slices, axis=2)
     except Exception as e:
