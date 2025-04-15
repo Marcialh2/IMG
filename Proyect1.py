@@ -102,6 +102,9 @@ def segment_image(volume, method="otsu", custom_threshold=None):
         batch_size = min(10, volume.shape[2])
         segmented_slices = []
         
+        # Imprimir información sobre el método seleccionado
+        print(f"Segmentando con método: {method}")
+        
         for i in range(0, volume.shape[2], batch_size):
             batch_end = min(i + batch_size, volume.shape[2])
             batch = volume[:,:,i:batch_end]
@@ -112,10 +115,13 @@ def segment_image(volume, method="otsu", custom_threshold=None):
                 
                 if custom_threshold is not None:
                     threshold = custom_threshold
+                    print(f"Slice {i+j}: Usando umbral personalizado: {threshold}")
                 elif method == "otsu":
                     threshold = threshold_otsu(slice_data)
+                    print(f"Slice {i+j}: Umbral Otsu: {threshold}")
                 elif method == "yen":
                     threshold = threshold_yen(slice_data)
+                    print(f"Slice {i+j}: Umbral Yen: {threshold}")
                 
                 batch[:,:,j] = slice_data > threshold
             
@@ -240,18 +246,29 @@ class DICOMApp:
             if self.volume is None:
                 return
 
+            print("Actualizando segmentación...")
+            
             if self.use_custom_threshold_otsu.get():
                 thresh_otsu = self.custom_threshold_otsu.get()
+                print(f"Usando umbral personalizado para Otsu: {thresh_otsu}")
             else:
                 thresh_otsu = None
+                print("Usando umbral automático para Otsu")
 
             if self.use_custom_threshold_yen.get():
                 thresh_yen = self.custom_threshold_yen.get()
+                print(f"Usando umbral personalizado para Yen: {thresh_yen}")
             else:
                 thresh_yen = None
+                print("Usando umbral automático para Yen")
 
+            print("Segmentando con método Otsu...")
             self.seg_otsu = segment_image(self.volume, method="otsu", custom_threshold=thresh_otsu)
+            
+            print("Segmentando con método Yen...")
             self.seg_yen = segment_image(self.volume, method="yen", custom_threshold=thresh_yen)
+            
+            print("Actualizando imágenes...")
             self.update_images()
         except Exception as e:
             messagebox.showerror("Error", str(e))
@@ -262,12 +279,33 @@ class DICOMApp:
                 return
 
             i = int(float(self.slider.get()))
+            print(f"Mostrando slice {i}")
+            
+            # Limpiar los ejes antes de mostrar nuevas imágenes
+            for ax in self.axes:
+                ax.clear()
+            
+            # Mostrar la imagen original
             self.axes[0].imshow(self.volume[:, :, i], cmap='gray')
             self.axes[0].set_title("Original")
-            self.axes[1].imshow(self.seg_otsu[:, :, i], cmap='gray')
-            self.axes[1].set_title("Otsu")
-            self.axes[2].imshow(self.seg_yen[:, :, i], cmap='gray')
-            self.axes[2].set_title("Yen")
+            
+            # Mostrar la imagen segmentada con Otsu
+            if self.seg_otsu is not None:
+                print(f"Mostrando segmentación Otsu para slice {i}")
+                self.axes[1].imshow(self.seg_otsu[:, :, i], cmap='gray')
+                self.axes[1].set_title("Otsu")
+            else:
+                print("No hay segmentación Otsu disponible")
+                self.axes[1].set_title("Otsu (No disponible)")
+            
+            # Mostrar la imagen segmentada con Yen
+            if self.seg_yen is not None:
+                print(f"Mostrando segmentación Yen para slice {i}")
+                self.axes[2].imshow(self.seg_yen[:, :, i], cmap='gray')
+                self.axes[2].set_title("Yen")
+            else:
+                print("No hay segmentación Yen disponible")
+                self.axes[2].set_title("Yen (No disponible)")
 
             for ax in self.axes:
                 ax.axis('off')
